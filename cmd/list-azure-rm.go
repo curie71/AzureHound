@@ -25,7 +25,9 @@ import (
 	"time"
 
 	"github.com/bloodhoundad/azurehound/v2/client"
+	"github.com/bloodhoundad/azurehound/v2/constants"
 	"github.com/bloodhoundad/azurehound/v2/enums"
+	"github.com/bloodhoundad/azurehound/v2/internal"
 	"github.com/bloodhoundad/azurehound/v2/models"
 	"github.com/bloodhoundad/azurehound/v2/panicrecovery"
 	"github.com/bloodhoundad/azurehound/v2/pipeline"
@@ -117,6 +119,7 @@ func listAllRM(ctx context.Context, client client.AzureClient) <-chan interface{
 		subscriptions10              = make(chan interface{})
 		subscriptions11              = make(chan interface{})
 		subscriptions12              = make(chan interface{})
+		subscriptions13              = make(chan interface{})
 		subscriptionRoleAssignments1 = make(chan interface{})
 		subscriptionRoleAssignments2 = make(chan interface{})
 
@@ -127,6 +130,10 @@ func listAllRM(ctx context.Context, client client.AzureClient) <-chan interface{
 		virtualMachineRoleAssignments3 = make(chan azureWrapper[models.VirtualMachineRoleAssignments])
 		virtualMachineRoleAssignments4 = make(chan azureWrapper[models.VirtualMachineRoleAssignments])
 		virtualMachineRoleAssignments5 = make(chan azureWrapper[models.VirtualMachineRoleAssignments])
+		storageAccounts                = make(chan interface{})
+		storageAccounts2               = make(chan interface{})
+		storageAccountRoleAssignments1 = make(chan interface{})
+		storageAccountRoleAssignments2 = make(chan interface{})
 	)
 
 	// Enumerate entities
@@ -144,6 +151,7 @@ func listAllRM(ctx context.Context, client client.AzureClient) <-chan interface{
 		subscriptions10,
 		subscriptions11,
 		subscriptions12,
+		subscriptions13,
 	)
 	pipeline.Tee(ctx.Done(), listResourceGroups(ctx, client, subscriptions2), resourceGroups, resourceGroups2)
 	pipeline.Tee(ctx.Done(), listKeyVaults(ctx, client, subscriptions3), keyVaults, keyVaults2, keyVaults3)
@@ -155,6 +163,29 @@ func listAllRM(ctx context.Context, client client.AzureClient) <-chan interface{
 	pipeline.Tee(ctx.Done(), listLogicApps(ctx, client, subscriptions10), logicApps, logicApps2)
 	pipeline.Tee(ctx.Done(), listManagedClusters(ctx, client, subscriptions11), managedClusters, managedClusters2)
 	pipeline.Tee(ctx.Done(), listVMScaleSets(ctx, client, subscriptions12), vmScaleSets, vmScaleSets2)
+	pipeline.Tee(ctx.Done(), listStorageAccounts(ctx, client, subscriptions13), storageAccounts, storageAccounts2)
+	pipeline.Tee(ctx.Done(), listStorageAccountRoleAssignments(ctx, client, storageAccounts2), storageAccountRoleAssignments1, storageAccountRoleAssignments2)
+	storageAccountOwners := listStorageAccountOwners(ctx, storageAccountRoleAssignments1)
+	storageAccountUserAccessAdmins := listStorageAccountUserAccessAdmins(ctx, storageAccountRoleAssignments2)
+
+	// GetAzureADTenants(ctx context.Context, includeAllTenantCategories bool) (azure.TenantList, error)
+	// ListRoleAssignmentsForResource(ctx context.Context, resourceId string, filter, tenantId string) <-chan AzureResult[azure.RoleAssignment]
+	// ListAzureADTenants(ctx context.Context, includeAllTenantCategories bool) <-chan AzureResult[azure.Tenant]
+	// ListAzureContainerRegistries(ctx context.Context, subscriptionId string) <-chan AzureResult[azure.ContainerRegistry]
+	// ListAzureWebApps(ctx context.Context, subscriptionId string) <-chan AzureResult[azure.WebApp]
+	// ListAzureManagedClusters(ctx context.Context, subscriptionId string) <-chan AzureResult[azure.ManagedCluster]
+	// ListAzureVMScaleSets(ctx context.Context, subscriptionId string) <-chan AzureResult[azure.VMScaleSet]
+	// ListAzureKeyVaults(ctx context.Context, subscriptionId string, params query.RMParams) <-chan AzureResult[azure.KeyVault]
+	// ListAzureManagementGroups(ctx context.Context, skipToken string) <-chan AzureResult[azure.ManagementGroup]
+	// ListAzureManagementGroupDescendants(ctx context.Context, groupId string, top int32) <-chan AzureResult[azure.DescendantInfo]
+	// ListAzureResourceGroups(ctx context.Context, subscriptionId string, params query.RMParams) <-chan AzureResult[azure.ResourceGroup]
+	// ListAzureSubscriptions(ctx context.Context) <-chan AzureResult[azure.Subscription]
+	// ListAzureVirtualMachines(ctx context.Context, subscriptionId string, params query.RMParams) <-chan AzureResult[azure.VirtualMachine]
+	// ListAzureStorageAccounts(ctx context.Context, subscriptionId string) <-chan AzureResult[azure.StorageAccount]
+	// ListAzureStorageContainers(ctx context.Context, subscriptionId string, resourceGroupName string, saName string, filter string, includeDeleted string, maxPageSize string) <-chan AzureResult[azure.StorageContainer]
+	// ListAzureAutomationAccounts(ctx context.Context, subscriptionId string) <-chan AzureResult[azure.AutomationAccount]
+	// ListAzureLogicApps(ctx context.Context, subscriptionId string, filter string, top int32) <-chan AzureResult[azure.LogicApp]
+	// ListAzureFunctionApps(ctx context.Context, subscriptionId string) <-chan AzureResult[azure.FunctionApp]
 
 	// Enumerate Relationships
 	// ManagementGroups: Descendants, Owners and UserAccessAdmins
@@ -247,5 +278,65 @@ func listAllRM(ctx context.Context, client client.AzureClient) <-chan interface{
 		vmScaleSetRoleAssignments,
 		webApps,
 		webAppRoleAssignments,
+		storageAccounts,
+		storageAccountRoleAssignments1,
+		storageAccountOwners,
+		storageAccountUserAccessAdmins,
 	)
+}
+
+func listStorageAccountOwners(ctx context.Context, roleAssignments <-chan interface{}) <-chan interface{} {
+	return pipeline.Map(ctx.Done(), roleAssignments, func(ra interface{}) interface{} {
+		if wrapper, ok := ra.(AzureWrapper); !ok {
+			log.Error(fmt.Errorf("failed type assertion"), "unable to process storage account role assignments", "result", ra)
+			return nil
+		} else if assignments, ok := wrapper.Data.(models.AzureRoleAssignments); !ok {
+			log.Error(fmt.Errorf("failed type assertion"), "unable to process storage account role assignments", "result", ra)
+			return nil
+		} else {
+			filteredAssignments := internal.Filter(assignments.RoleAssignments, func(ra models.AzureRoleAssignment) bool {
+				return ra.RoleDefinitionId == constants.OwnerRoleID
+			})
+
+			owners := internal.Map(filteredAssignments, func(ra models.AzureRoleAssignment) models.StorageAccountOwner {
+				return models.StorageAccountOwner{
+					Owner:          ra.Assignee,
+					StorageAccount: assignments.ObjectId,
+				}
+			})
+
+			return NewAzureWrapper(enums.KindAZStorageAccountOwner, models.StorageAccountOwners{
+				StorageAccountId: assignments.ObjectId,
+				Owners:           owners,
+			})
+		}
+	})
+}
+
+func listStorageAccountUserAccessAdmins(ctx context.Context, roleAssignments <-chan interface{}) <-chan interface{} {
+	return pipeline.Map(ctx.Done(), roleAssignments, func(ra interface{}) interface{} {
+		if wrapper, ok := ra.(AzureWrapper); !ok {
+			log.Error(fmt.Errorf("failed type assertion"), "unable to process storage account role assignments", "result", ra)
+			return nil
+		} else if assignments, ok := wrapper.Data.(models.AzureRoleAssignments); !ok {
+			log.Error(fmt.Errorf("failed type assertion"), "unable to process storage account role assignments", "result", ra)
+			return nil
+		} else {
+			filteredAssignments := internal.Filter(assignments.RoleAssignments, func(ra models.AzureRoleAssignment) bool {
+				return ra.RoleDefinitionId == constants.UserAccessAdminRoleID
+			})
+
+			admins := internal.Map(filteredAssignments, func(ra models.AzureRoleAssignment) models.StorageAccountUserAccessAdmin {
+				return models.StorageAccountUserAccessAdmin{
+					UserAccessAdmin: ra.Assignee,
+					StorageAccount:  assignments.ObjectId,
+				}
+			})
+
+			return NewAzureWrapper(enums.KindAZStorageAccountUserAccessAdmin, models.StorageAccountUserAccessAdmins{
+				StorageAccountId: assignments.ObjectId,
+				UserAccessAdmins: admins,
+			})
+		}
+	})
 }
